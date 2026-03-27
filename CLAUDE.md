@@ -498,3 +498,508 @@ Write unit tests in test_signal_engine.py that verify:
 
 Run the tests immediately after writing them and fix any failures.
 Use Config from config.py and structlog from utils.py."
+
+## Prompt 5:
+"Implement decision_engine.py for the Polymarket copy-trading bot.
+
+This module combines the wallet score and signal engine output into a final
+copy/skip decision with position sizing. It is pure Python logic — no
+external APIs, no AI, no network calls of any kind.
+
+INPUT:
+  trade: NewTrade
+  wallet_score: WalletScore | None
+  signal_result: SignalResult       (from signal_engine.py)
+  open_positions: list              (from db.get_open_positions())
+  available_usdc: float
+
+HARD GATE RULES (apply in order — first failure = skip immediately):
+
+GATE 1 — Wallet data available:
+  Skip if wallet_score is None.
+  skip_reason = "no_wallet_data"
+
+GATE 2 — Wallet minimum quality:
+  Skip if wallet_score.win_rate < config.MIN_WALLET_WIN_RATE
+  Skip if wallet_score.total_bets < config.MIN_WALLET_BETS
+  skip_reason = "wallet_below_threshold"
+
+GATE 3 — Minimum signal score:
+  Skip if signal_result.final_score < config.MIN_SIGNAL_SCORE
+  skip_reason = "signal_score_too_low"
+
+GATE 4 — Market timing:
+  Skip if market closes in less than 3 hours
+  Skip if market closes in more than 90 days
+  skip_reason = "market_timing"
+
+GATE 5 — Price sanity:
+  Skip if trade.price < 0.04
+  Skip if trade.price > 0.96
+  skip_reason = "price_out_of_range"
+
+GATE 6 — Duplicate position:
+  Skip if there is already an open position in this market_id AND side
+  skip_reason = "duplicate_position"
+
+GATE 7 — Portfolio exposure cap:
+  total_exposure = sum of open positions' size_usdc
+  Skip if total_exposure >= config.MAX_PORTFOLIO_EXPOSURE_USDC
+  skip_reason = "max_exposure_reached"
+
+GATE 8 — Minimum capital:
+  Skip if available_usdc < 25.0
+  skip_reason = "insufficient_capital"
+
+POSITION SIZING (only reached if all gates pass):
+  base_size   = trade.size_usdc * config.COPY_RATIO
+  cap_by_max  = config.MAX_POSITION_SIZE_USDC
+  cap_by_pct  = available_usdc * 0.12        # never more than 12% of balance
+  cap_by_room = config.MAX_PORTFOLIO_EXPOSURE_USDC - total_exposure
+  final_size  = round(min(base_size, cap_by_max, cap_by_pct, cap_by_room), 2)
+
+  If final_size < 10.0:
+    skip with reason = "position_too_small"
+
+SIGNAL SCORE TIERING:
+  Map the signal score to a confidence label for display:
+    >= 85: "very high"
+    >= 70: "high"
+    >= 55: "medium"  (MIN_SIGNAL_SCORE should be set above this in practice)
+    <  55: "low"
+
+Decision DATACLASS:
+  action: str                    # "copy" or "skip"
+  side: str | None               # "YES" or "NO" (None if skip)
+  size_usdc: float | None        # (None if skip)
+  signal_score: int              # always present (0–100)
+  confidence_label: str          # "very high" / "high" / "medium" / "low"
+  skip_reason: str | None        # populated if skip
+  reasoning: str                 # from signal_engine.generate_reasoning()
+  trade: NewTrade
+  wallet_score: WalletScore | None
+  signal_result: SignalResult
+
+EXPOSED INTERFACE:
+DecisionEngine class with:
+  __init__(self, config: Config, db: Database, signal_engine: SignalEngine)
+  evaluate(self, trade, wallet_score, available_usdc) -> Decision
+    Fetches open positions from DB internally.
+    Runs all 8 gates in order.
+    If all pass, calculates position size.
+    Returns a Decision in all cases.
+
+LOGGING:
+Log every decision at INFO level:
+  action=copy  wallet={label} score={signal_score} size=${size} market="{question[:55]}"
+  action=skip  wallet={label} score={signal_score} reason={skip_reason} market="{question[:55]}"
+
+Write unit tests in test_decision_engine.py that cover:
+  1. wallet_score=None → skip with "no_wallet_data"
+  2. win_rate below threshold → skip with "wallet_below_threshold"
+  3. signal_score below MIN_SIGNAL_SCORE → skip with "signal_score_too_low"
+  4. duplicate position same market+side → skip with "duplicate_position"
+  5. available_usdc=15 → skip with "insufficient_capital"
+  6. portfolio at max exposure → skip with "max_exposure_reached"
+  7. valid trade → action="copy", size_usdc respects all three caps
+  8. final_size rounds to 2 decimal places
+  9. confidence_label maps correctly at 85, 70, 55 boundaries
+
+Run the tests immediately and fix any failures before finishing.
+Use Config from config.py, Database from db.py, structlog from utils.py."
+
+## Prompt 6:
+"Implement executor.py for the Polymarket copy-trading bot.
+
+This module receives a Decision and places the actual order on Polymarket
+via py-clob-client. It handles authentication, dry-run safety, Cloudflare
+errors, and full audit logging. No external AI APIs are used.
+
+AUTHENTICATION:
+Initialise ClobClient with signature_type=1 (email/Magic wallet proxy):
+  from py_clob_client.client import ClobClient
+  from py_clob_client.clob_types import ApiCreds
+
+  client = ClobClient(
+      host="https://clob.polymarket.com",
+      key=config.POLYMARKET_PK,
+      chain_id=137,
+      signature_type=1,
+      funder=config.POLYMARKET_FUNDER
+  )
+  client.set_api_creds(ApiCreds(
+      api_key=config.POLYMARKET_API_KEY,
+      api_secret=config.POLYMARKET_API_SECRET,
+      api_passphrase=config.POLYMARKET_API_PASSPHRASE
+  ))
+
+Initialise the client once in __init__ and reuse it for all calls.
+
+DRY RUN MODE:
+The FIRST thing execute() checks is config.DRY_RUN.
+If True:
+  - Make zero API calls
+  - Log "[DRY RUN] Would place {side} order: ${size} on '{question}'"
+  - Write to DB: copied=True, tx_hash="DRY_RUN", signal_score
+  - Return ExecutionResult(success=True, tx_hash="DRY_RUN", filled_size=size,
+      filled_price=trade.price, error=None)
+Never proceed past this check unless DRY_RUN is explicitly False.
+
+BALANCE VERIFICATION:
+Before placing any live order:
+  balance = float(client.get_balance())
+  If balance < decision.size_usdc:
+    Log ERROR "Insufficient balance: have ${balance}, need ${size}"
+    Return ExecutionResult(success=False, error="insufficient_balance")
+  Log DEBUG "Balance check: ${balance} available, placing ${size} order"
+
+ORDER PLACEMENT:
+Use MarketOrderArgs with OrderType.FOK (Fill Or Kill):
+  from py_clob_client.clob_types import MarketOrderArgs, OrderType
+  from py_clob_client.order_builder.constants import BUY, SELL
+
+  side = BUY if decision.side == "YES" else SELL
+  order_args = MarketOrderArgs(
+      token_id=decision.trade.token_id,
+      amount=decision.size_usdc,
+      side=side,
+  )
+  signed_order = client.create_market_order(order_args)
+  response = client.post_order(signed_order, OrderType.FOK)
+
+FOK means the order is either fully filled immediately or cancelled.
+This prevents partial fills and stuck open orders.
+
+CLOUDFLARE HANDLING:
+The CLOB API blocks many IP ranges on POST requests.
+Implement this retry sequence specifically for 403 errors:
+  1. Catch HTTP 403 on post_order()
+  2. Log WARNING "Cloudflare 403 on attempt {n}. Waiting 5s before retry."
+  3. Sleep 5 seconds, then retry once
+  4. If the retry also returns 403:
+     - Increment a session-level cloudflare_block_count counter
+     - If cloudflare_block_count >= 3:
+         Log ERROR "Persistent Cloudflare blocking. Consider a residential
+         proxy. See README.md for instructions."
+     - Return ExecutionResult(success=False, error="cloudflare_blocked")
+
+SAFETY INVARIANT:
+Before placing any order, assert:
+  assert decision.size_usdc <= config.MAX_POSITION_SIZE_USDC * 1.05, \
+    f"Order size {decision.size_usdc} exceeds maximum. This is a bug."
+If this assertion fails, log CRITICAL and return failure — do not place
+the order under any circumstances.
+
+ExecutionResult DATACLASS:
+  success: bool
+  tx_hash: str | None
+  filled_size: float | None
+  filled_price: float | None
+  error: str | None
+  timestamp: datetime
+
+POST-EXECUTION (on success):
+  1. db.update_trade_tx(trade_db_id, tx_hash)
+  2. Insert into positions table with entry_price, size, market details
+  3. Log INFO "ORDER FILLED — {side} ${filled_size} on '{question}' @ {price}"
+  4. Log the full response from Polymarket at DEBUG level
+
+POST-EXECUTION (on failure):
+  1. Log ERROR with the full error string and trade details
+  2. Do NOT retry failed orders — operator should investigate via logs
+
+EXPOSED INTERFACE:
+Executor class with:
+  __init__(self, config: Config, db: Database)
+    Initialises the ClobClient and sets cloudflare_block_count = 0
+  execute(self, decision: Decision, trade_db_id: int) -> ExecutionResult
+    Full execution flow as described above.
+  get_balance(self) -> float
+    Returns current USDC balance. Returns 0.0 on error (logs WARNING).
+
+Use Config from config.py, Database from db.py, structlog from utils.py.
+Log every function entry/exit at DEBUG level for full audit trail."
+
+## Prompt 7:
+"Implement alerts.py for the Polymarket copy-trading bot.
+
+This module sends formatted Telegram messages for every bot decision
+and produces a daily performance summary. No AI APIs are used — all
+message text is generated from structured data using Python f-strings.
+
+SETUP:
+  from telegram import Bot
+  bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+  Use synchronous send_message() calls.
+  chat_id = config.TELEGRAM_CHAT_ID
+
+  Wrap EVERY send call in try/except Exception.
+  A Telegram failure must NEVER crash or pause the bot.
+  On failure, log a WARNING "Telegram send failed: {error}" and return.
+
+ALERT TYPES:
+
+1. send_copy_alert(decision: Decision, result: ExecutionResult) -> None
+
+   Format (use Telegram HTML parse_mode):
+   ✅ <b>COPIED</b> — Score: {signal_score}/100 ({confidence_label})
+
+   📋 <b>{question[:80]}</b>
+   👤 Copying: {wallet_label} ({win_rate_pct} win rate, {total_bets} bets)
+   📊 Side: <b>{side}</b> @ ${price:.2f} | Size: ${size:.2f} USDC
+   ⏰ Closes: {time_until(closes_at)}
+
+   💡 {reasoning}
+
+   Status: {"✓ FILLED" if success else "✗ FAILED"}
+   {tx_hash if success else "Error: " + result.error}
+
+   Prepend [DRY RUN] to the first line if config.DRY_RUN is True.
+
+2. send_skip_alert(decision: Decision) -> None
+
+   Only send skip alerts if signal_score >= 50.
+   (Avoids spamming you with uninteresting low-score skips.)
+
+   Format:
+   ⏭ <b>SKIPPED</b> — Score: {signal_score}/100
+
+   📋 {question[:80]}
+   👤 Wallet: {wallet_label}
+   ❌ Reason: {skip_reason}
+   💡 {reasoning}
+
+3. send_daily_summary() -> None
+
+   Pull data from db.get_daily_summary() which returns:
+     copies_today, skips_today, pnl_usdc, open_positions, total_exposure
+
+   Format:
+   📊 <b>Daily Summary — {date}</b>
+
+   Trades copied: {copies_today}
+   Trades skipped: {skips_today}
+   Estimated P&L today: {format_usdc(pnl_usdc)}
+   Open positions: {open_positions}
+   Portfolio exposure: {format_usdc(total_exposure)}
+   Bot status: Running ✓
+
+4. send_startup_alert(wallet_count: int) -> None
+
+   Format:
+   🤖 <b>Bot started</b>
+   Watching: {wallet_count} wallets
+   Mode: {"DRY RUN 🔶" if dry_run else "LIVE 🔴"}
+   Min signal score: {min_signal_score}/100
+   Min win rate: {min_win_rate_pct}
+   Poll interval: every {poll_interval}s
+
+5. send_error_alert(context: str, error: str) -> None
+
+   Format:
+   🚨 <b>Bot Error</b>
+   Context: {context}
+   Error: {error}
+
+EXPOSED INTERFACE:
+AlertManager class with all 5 methods above.
+  __init__(self, config: Config, db: Database)
+
+Use Config from config.py, Database from db.py, utils.py for formatters."
+
+## Prompt 8:
+"Implement main.py — the entry point that wires all modules together
+into a running bot for the Polymarket copy-trading system.
+
+IMPORTS AND INITIALISATION:
+Initialise all components in this exact order:
+  config  = Config()
+  db      = Database()
+  scorer  = WalletScorer(config, db)
+  signals = SignalEngine(config)
+  engine  = DecisionEngine(config, db, signals)
+  monitor = WalletMonitor(config, db)
+  executor = Executor(config, db)
+  alerts  = AlertManager(config, db)
+
+COMMAND-LINE ARGUMENTS (use argparse):
+  --live       Force live trading mode (DRY_RUN = False)
+  --dry-run    Force dry-run mode (DRY_RUN = True) — this is the DEFAULT
+               if neither flag is passed
+
+If --live is passed:
+  Print this exact warning to stdout:
+    ╔══════════════════════════════════════════════╗
+    ║  ⚠️  LIVE MODE — real USDC will be spent.   ║
+    ║  Press Ctrl+C within 5 seconds to cancel.   ║
+    ╚══════════════════════════════════════════════╝
+  Then sleep 5 seconds. Only proceed if no KeyboardInterrupt.
+
+STARTUP SEQUENCE (run in this order before the main loop):
+  1. Print a startup banner showing: version, mode, wallets file, all config
+     values EXCEPT POLYMARKET_PK, POLYMARKET_API_SECRET, POLYMARKET_API_PASSPHRASE
+  2. Load wallets from wallets.json — exit with clear error message if empty
+  3. Call scorer.refresh_all() for all configured wallets. Log each wallet's
+     composite score so you can see the quality of what you're copying.
+  4. Call executor.get_balance() and log the current USDC balance
+  5. Call alerts.send_startup_alert()
+  6. Register all scheduled jobs (see SCHEDULING section)
+  7. Start the main polling loop
+
+MAIN CALLBACK:
+def on_new_trade(trade: NewTrade) -> None:
+  This function is called by monitor.run_forever() for each detected trade.
+
+  Steps:
+  1. wallet_score = scorer.get_score(trade.wallet_address)
+     (uses cached DB score — no API call here)
+  2. available_usdc = executor.get_balance()
+  3. decision = engine.evaluate(trade, wallet_score, available_usdc)
+  4. If decision.action == "copy":
+       trade_db_id = db.insert_trade(trade, copied=True, skip_reason=None,
+                                     tx_hash=None, signal_score=decision.signal_score)
+       db.log_signals(trade_db_id, decision.signal_result.signals)
+       result = executor.execute(decision, trade_db_id)
+       alerts.send_copy_alert(decision, result)
+     Else:
+       trade_db_id = db.insert_trade(trade, copied=False,
+                                     skip_reason=decision.skip_reason,
+                                     tx_hash=None,
+                                     signal_score=decision.signal_score)
+       db.log_signals(trade_db_id, decision.signal_result.signals)
+       alerts.send_skip_alert(decision)
+
+  Wrap the entire function in try/except Exception:
+    Log the full traceback at ERROR level.
+    Call alerts.send_error_alert("on_new_trade", str(e))
+    Do NOT re-raise — the bot must continue running after a single trade error.
+
+SCHEDULING (use the schedule library):
+  schedule.every(6).hours.do(
+      lambda: scorer.refresh_all([w["address"] for w in load_wallets()])
+  )
+  schedule.every().day.at("08:00").do(alerts.send_daily_summary)
+  schedule.every(5).minutes.do(lambda: log.info("watchdog", status="alive",
+      uptime_seconds=int((datetime.utcnow() - start_time).total_seconds())))
+
+HEALTH CHECK HTTP SERVER:
+Start a lightweight HTTP server in a background daemon thread on port 8080.
+Respond to GET / with:
+  {"status": "ok", "uptime_seconds": N, "mode": "live"/"dry_run",
+   "wallets_watched": N, "trades_copied_today": N}
+Use Python's built-in http.server.BaseHTTPRequestHandler.
+The thread must be daemon=True so it doesn't block shutdown.
+
+GRACEFUL SHUTDOWN:
+Register handlers for both KeyboardInterrupt and SIGTERM.
+On shutdown:
+  1. Log "Shutting down gracefully..."
+  2. Run pending schedule jobs one final time (in case of daily summary)
+  3. Send Telegram: "🛑 Bot stopped. Final balance: ${balance}"
+  4. Close DB connection cleanly
+
+MAIN LOOP:
+  poll_count = 0
+  while True:
+    schedule.run_pending()
+    new_trades = monitor.poll()
+    for trade in new_trades:
+      on_new_trade(trade)
+    poll_count += 1
+    time.sleep(config.POLL_INTERVAL_SECONDS)
+
+  On consecutive monitor failures (5 in a row):
+    alerts.send_error_alert("monitor", "5 consecutive poll failures")
+    sys.exit(1)
+
+Use Config, all module classes, structlog from utils.py."
+
+## Prompt 9:
+"Create setup.py — a standalone script users run ONCE before starting
+the bot. It validates credentials, generates API keys, and confirms
+that all external services are reachable. No AI API is involved.
+
+Run these steps in order. Print ✓ or ✗ for each one.
+If a step fails, print a clear error message and continue to the next step
+rather than exiting immediately. Show a final summary at the end.
+
+STEP 1 — Python version check:
+  Verify Python >= 3.11. Print the current version.
+  If below 3.11, print install instructions and mark as failed.
+
+STEP 2 — Dependency check:
+  Try to import each required package and print pass/fail:
+    py_clob_client, web3, dotenv, requests, telegram, schedule, structlog, numpy
+  If any import fails, print: "Run: pip install -r requirements.txt"
+
+STEP 3 — .env file validation:
+  Check that .env exists (not just .env.example).
+  For each required env var, print ✓ if set and non-empty, ✗ if missing:
+    POLYMARKET_PK, POLYMARKET_FUNDER, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+  Do NOT print the actual values of POLYMARKET_PK or any secret.
+
+STEP 4 — Generate Polymarket API credentials:
+  If POLYMARKET_API_KEY is already set in .env, print "✓ API credentials
+  already configured" and skip this step.
+
+  Otherwise:
+    client = ClobClient(
+        host="https://clob.polymarket.com",
+        key=os.getenv("POLYMARKET_PK"),
+        chain_id=137,
+        signature_type=1,
+        funder=os.getenv("POLYMARKET_FUNDER")
+    )
+    creds = client.create_or_derive_api_creds()
+
+  Write the three credential values into .env by:
+    1. Reading the full .env file content
+    2. Replacing POLYMARKET_API_KEY=, POLYMARKET_API_SECRET=,
+       POLYMARKET_API_PASSPHRASE= lines with the generated values
+    3. Writing the file back
+
+  Print: "✓ API credentials generated and written to .env"
+  Print: "  API_KEY: {first 8 chars}..." (truncate for security)
+
+STEP 5 — Test Polymarket connectivity:
+  Call client.get_ok() — expect True.
+  Print: "✓ Polymarket API reachable" or "✗ Polymarket API unreachable: {error}"
+
+STEP 6 — Check wallet balance:
+  balance = float(client.get_balance())
+  Print: "✓ Wallet balance: ${balance:.2f} USDC"
+  If balance == 0:
+    Print: "⚠️  Balance is $0. Fund your wallet before going live."
+    Print: "    Deposit USDC (Polygon network) to: {POLYMARKET_FUNDER}"
+
+STEP 7 — Test Telegram connectivity:
+  Send a test message to TELEGRAM_CHAT_ID:
+    "🤖 Polymarket Copy Bot — setup test message. If you see this, Telegram is working."
+  Print: "✓ Telegram message sent" or "✗ Telegram failed: {error}"
+  On failure, print: "Check your TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"
+
+STEP 8 — Validate wallets.json:
+  Check the file exists and is valid JSON.
+  Count wallets in the wallets array.
+  If count == 0:
+    Print: "⚠️  wallets.json is empty. Add wallets before starting."
+    Print: "    Find top wallets at: https://polytrackhq.app"
+    Print: "    Look for: win rate > 60%, total bets > 50, active recently"
+  Else:
+    Print: "✓ {count} wallet(s) configured"
+    For each wallet, print: "    {label}: {address[:10]}..."
+
+STEP 9 — Database initialisation:
+  Instantiate Database() which runs CREATE TABLE IF NOT EXISTS.
+  Print: "✓ Database initialised at ./bot.db"
+
+STEP 10 — Final summary:
+  Print a box showing the count of passed and failed steps.
+  If all steps pass:
+    Print:
+      "✅ Setup complete. Start the bot with:"
+      "   python main.py --dry-run    (watch logs for 24h first)"
+      "   python main.py --live       (when ready to trade real money)"
+  Else:
+    Print:
+      "⚠️  Fix the issues above before starting the bot.""
