@@ -126,6 +126,33 @@ class TestSignalEngine(unittest.TestCase):
         total = sum(weight for _, weight in SIGNALS_META)
         self.assertEqual(total, 100)
 
+    # Test 7: final_score is always an integer 0-100
+    def test_final_score_is_integer_in_range(self):
+        ws = make_wallet_score()
+        for price in [0.05, 0.25, 0.50, 0.75, 0.95]:
+            result = self.engine.compute(make_trade(price=price), ws, [], 1000.0)
+            self.assertIsInstance(result.final_score, int)
+            self.assertGreaterEqual(result.final_score, 0)
+            self.assertLessEqual(result.final_score, 100)
+
+    # Test 8: generate_reasoning returns a non-empty string
+    def test_generate_reasoning_returns_nonempty_string(self):
+        ws = make_wallet_score()
+        result = self.engine.compute(make_trade(), ws, [], 1000.0)
+        self.assertIsInstance(result.reasoning, str)
+        self.assertGreater(len(result.reasoning), 0)
+        self.assertIn("Score", result.reasoning)
+
+    # Test 9: signal calculation error sets that signal to 0.0 (not a crash)
+    def test_signal_error_sets_value_to_zero(self):
+        ws = make_wallet_score(avg_bet_size=0)  # causes division by zero in conviction
+        trade = make_trade(size_usdc=100.0)
+        # Should not raise — conviction signal falls back to 0.0
+        result = self.engine.compute(trade, ws, [], 1000.0)
+        sig = next(s for s in result.signals if s.name == "bet_size_conviction")
+        self.assertEqual(sig.value, 0.0)
+        self.assertIsInstance(result.final_score, int)
+
 
 if __name__ == "__main__":
     unittest.main()
