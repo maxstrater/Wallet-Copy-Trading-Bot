@@ -93,8 +93,9 @@ else:
 header(4, "Polymarket API credentials")
 client = None
 dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
-if dry_run:
-    warn("DRY RUN mode — skipping API credential setup (not needed until going live).")
+has_api_creds = bool(os.getenv("POLYMARKET_API_KEY", ""))
+if dry_run and not has_api_creds:
+    warn("DRY RUN mode — no API credentials set, skipping steps 4-6 (not needed until going live).")
     passed += 1
 else:
     try:
@@ -165,8 +166,8 @@ else:
 
 # ── Step 5 — Polymarket connectivity ─────────────────────────────────────────
 header(5, "Polymarket API connectivity")
-if dry_run:
-    warn("DRY RUN mode — skipping connectivity check.")
+if dry_run and not has_api_creds:
+    warn("DRY RUN mode — no API credentials set, skipping.")
     passed += 1
 else:
     try:
@@ -183,8 +184,8 @@ else:
 
 # ── Step 6 — Wallet balance ───────────────────────────────────────────────────
 header(6, "Wallet balance")
-if dry_run:
-    warn("DRY RUN mode — skipping balance check.")
+if dry_run and not has_api_creds:
+    warn("DRY RUN mode — no API credentials set, skipping.")
     passed += 1
 else:
     try:
