@@ -7,11 +7,15 @@ load_dotenv()
 REQUIRED_VARS = [
     "POLYMARKET_PK",
     "POLYMARKET_FUNDER",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+]
+
+# Only required when running in live mode (DRY_RUN != true)
+LIVE_ONLY_VARS = [
     "POLYMARKET_API_KEY",
     "POLYMARKET_API_SECRET",
     "POLYMARKET_API_PASSPHRASE",
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
 ]
 
 
@@ -35,19 +39,28 @@ class Config:
 
 
 def load_config() -> Config:
+    dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+
     for var in REQUIRED_VARS:
         if not os.getenv(var):
             raise ValueError(f"Missing required environment variable: {var}")
 
+    if not dry_run:
+        for var in LIVE_ONLY_VARS:
+            if not os.getenv(var):
+                raise ValueError(
+                    f"Missing required environment variable for live mode: {var}"
+                )
+
     return Config(
         polymarket_pk=os.environ["POLYMARKET_PK"],
         polymarket_funder=os.environ["POLYMARKET_FUNDER"],
-        polymarket_api_key=os.environ["POLYMARKET_API_KEY"],
-        polymarket_api_secret=os.environ["POLYMARKET_API_SECRET"],
-        polymarket_api_passphrase=os.environ["POLYMARKET_API_PASSPHRASE"],
+        polymarket_api_key=os.getenv("POLYMARKET_API_KEY", ""),
+        polymarket_api_secret=os.getenv("POLYMARKET_API_SECRET", ""),
+        polymarket_api_passphrase=os.getenv("POLYMARKET_API_PASSPHRASE", ""),
         telegram_bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
         telegram_chat_id=os.environ["TELEGRAM_CHAT_ID"],
-        dry_run=os.getenv("DRY_RUN", "true").lower() == "true",
+        dry_run=dry_run,
         max_position_size_usdc=float(os.getenv("MAX_POSITION_SIZE_USDC", "50")),
         max_portfolio_exposure_usdc=float(os.getenv("MAX_PORTFOLIO_EXPOSURE_USDC", "500")),
         copy_ratio=float(os.getenv("COPY_RATIO", "0.5")),

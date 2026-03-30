@@ -36,18 +36,21 @@ class Executor:
         self.config = config
         self.cloudflare_block_count = 0
 
-        self._client = ClobClient(
-            host="https://clob.polymarket.com",
-            key=config.polymarket_pk,
-            chain_id=137,
-            signature_type=1,
-            funder=config.polymarket_funder,
-        )
-        self._client.set_api_creds(ApiCreds(
-            api_key=config.polymarket_api_key,
-            api_secret=config.polymarket_api_secret,
-            api_passphrase=config.polymarket_api_passphrase,
-        ))
+        if config.dry_run:
+            self._client = None
+        else:
+            self._client = ClobClient(
+                host="https://clob.polymarket.com",
+                key=config.polymarket_pk,
+                chain_id=137,
+                signature_type=1,
+                funder=config.polymarket_funder,
+            )
+            self._client.set_api_creds(ApiCreds(
+                api_key=config.polymarket_api_key,
+                api_secret=config.polymarket_api_secret,
+                api_passphrase=config.polymarket_api_passphrase,
+            ))
         log.debug("executor_initialized")
 
     def get_balance(self) -> float:

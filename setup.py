@@ -198,7 +198,7 @@ try:
     bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN", ""))
     asyncio.run(bot.send_message(
         chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-        text="Polymarket Copy Bot -- setup test message. If you see this, Telegram is working.",
+        text="Whale Watcher -- setup test message. If you see this, Telegram is working.",
     ))
     ok("Telegram message sent")
 except Exception as e:

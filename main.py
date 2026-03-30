@@ -83,12 +83,15 @@ def load_wallets() -> list:
 def print_banner(config, mode: str):
     sep = "=" * 52
     print(f"\n{sep}")
-    print(f"  Polymarket Copy-Trading Bot  v{VERSION}")
+    print(f"  Whale Watcher  v{VERSION}")
     print(f"  Mode     : {mode.upper()}")
     print(f"  Wallets  : wallets.json")
     print(f"  {'-' * 43}")
     print(f"  Funder             : {config.polymarket_funder}")
-    print(f"  API Key            : {config.polymarket_api_key[:8]}...")
+    if config.polymarket_api_key:
+        print(f"  API Key            : {config.polymarket_api_key[:8]}...")
+    else:
+        print(f"  API Key            : (not set — dry-run only)")
     print(f"  Max position       : ${config.max_position_size_usdc}")
     print(f"  Max exposure       : ${config.max_portfolio_exposure_usdc}")
     print(f"  Copy ratio         : {config.copy_ratio}")
@@ -102,7 +105,7 @@ def print_banner(config, mode: str):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Polymarket wallet copy-trading bot")
+    parser = argparse.ArgumentParser(description="Whale Watcher — Polymarket wallet copy-trading bot")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--live", action="store_true", help="Enable live trading (real USDC)")
     mode_group.add_argument("--dry-run", action="store_true", help="Dry-run mode (default)")

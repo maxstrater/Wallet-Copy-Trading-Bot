@@ -1,5 +1,5 @@
 """
-End-to-end integration test for the Polymarket copy-trading bot.
+End-to-end integration test for Whale Watcher (Polymarket copy-trading bot).
 Uses a temp file SQLite DB. All external HTTP calls are mocked.
 DRY_RUN=True throughout.
 """
