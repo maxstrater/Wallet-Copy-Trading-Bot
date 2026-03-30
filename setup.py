@@ -92,103 +92,116 @@ else:
 # ── Step 4 — Generate Polymarket API credentials ──────────────────────────────
 header(4, "Polymarket API credentials")
 client = None
-try:
-    from py_clob_client.client import ClobClient
-    pk = os.getenv("POLYMARKET_PK", "")
-    funder = os.getenv("POLYMARKET_FUNDER", "")
+dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+if dry_run:
+    warn("DRY RUN mode — skipping API credential setup (not needed until going live).")
+    passed += 1
+else:
+    try:
+        from py_clob_client.client import ClobClient
+        pk = os.getenv("POLYMARKET_PK", "")
+        funder = os.getenv("POLYMARKET_FUNDER", "")
 
-    if not pk or not funder:
-        fail("Cannot generate credentials — POLYMARKET_PK or POLYMARKET_FUNDER missing")
-    elif os.getenv("POLYMARKET_API_KEY", ""):
-        ok("API credentials already configured")
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            key=pk,
-            chain_id=137,
-            signature_type=1,
-            funder=funder,
-        )
-        from py_clob_client.clob_types import ApiCreds
-        client.set_api_creds(ApiCreds(
-            api_key=os.getenv("POLYMARKET_API_KEY"),
-            api_secret=os.getenv("POLYMARKET_API_SECRET"),
-            api_passphrase=os.getenv("POLYMARKET_API_PASSPHRASE"),
-        ))
-    else:
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            key=pk,
-            chain_id=137,
-            signature_type=1,
-            funder=funder,
-        )
-        creds = client.create_or_derive_api_creds()
-        api_key = creds.get("apiKey") or creds.get("api_key", "")
-        api_secret = creds.get("secret") or creds.get("api_secret", "")
-        api_passphrase = creds.get("passphrase") or creds.get("api_passphrase", "")
-
-        # Write back to .env
-        with open(".env", "r") as f:
-            content = f.read()
-
-        def set_env_line(content, key, value):
-            import re
-            pattern = rf"^{key}=.*$"
-            replacement = f"{key}={value}"
-            if re.search(pattern, content, flags=re.MULTILINE):
-                return re.sub(pattern, replacement, content, flags=re.MULTILINE)
-            return content + f"\n{key}={value}"
-
-        content = set_env_line(content, "POLYMARKET_API_KEY", api_key)
-        content = set_env_line(content, "POLYMARKET_API_SECRET", api_secret)
-        content = set_env_line(content, "POLYMARKET_API_PASSPHRASE", api_passphrase)
-
-        with open(".env", "w") as f:
-            f.write(content)
-
-        ok("API credentials generated and written to .env")
-        print(f"       API_KEY: {api_key[:8]}...")
-        client.set_api_creds(
-            __import__("py_clob_client.clob_types", fromlist=["ApiCreds"]).ApiCreds(
-                api_key=api_key,
-                api_secret=api_secret,
-                api_passphrase=api_passphrase,
+        if not pk or not funder:
+            fail("Cannot generate credentials — POLYMARKET_PK or POLYMARKET_FUNDER missing")
+        elif os.getenv("POLYMARKET_API_KEY", ""):
+            ok("API credentials already configured")
+            client = ClobClient(
+                host="https://clob.polymarket.com",
+                key=pk,
+                chain_id=137,
+                signature_type=1,
+                funder=funder,
             )
-        )
-except Exception as e:
-    fail(f"Credential setup failed: {e}")
+            from py_clob_client.clob_types import ApiCreds
+            client.set_api_creds(ApiCreds(
+                api_key=os.getenv("POLYMARKET_API_KEY"),
+                api_secret=os.getenv("POLYMARKET_API_SECRET"),
+                api_passphrase=os.getenv("POLYMARKET_API_PASSPHRASE"),
+            ))
+        else:
+            client = ClobClient(
+                host="https://clob.polymarket.com",
+                key=pk,
+                chain_id=137,
+                signature_type=1,
+                funder=funder,
+            )
+            creds = client.create_or_derive_api_creds()
+            api_key = creds.get("apiKey") or creds.get("api_key", "")
+            api_secret = creds.get("secret") or creds.get("api_secret", "")
+            api_passphrase = creds.get("passphrase") or creds.get("api_passphrase", "")
+
+            # Write back to .env
+            with open(".env", "r") as f:
+                content = f.read()
+
+            def set_env_line(content, key, value):
+                import re
+                pattern = rf"^{key}=.*$"
+                replacement = f"{key}={value}"
+                if re.search(pattern, content, flags=re.MULTILINE):
+                    return re.sub(pattern, replacement, content, flags=re.MULTILINE)
+                return content + f"\n{key}={value}"
+
+            content = set_env_line(content, "POLYMARKET_API_KEY", api_key)
+            content = set_env_line(content, "POLYMARKET_API_SECRET", api_secret)
+            content = set_env_line(content, "POLYMARKET_API_PASSPHRASE", api_passphrase)
+
+            with open(".env", "w") as f:
+                f.write(content)
+
+            ok("API credentials generated and written to .env")
+            print(f"       API_KEY: {api_key[:8]}...")
+            client.set_api_creds(
+                __import__("py_clob_client.clob_types", fromlist=["ApiCreds"]).ApiCreds(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    api_passphrase=api_passphrase,
+                )
+            )
+    except Exception as e:
+        fail(f"Credential setup failed: {e}")
 
 # ── Step 5 — Polymarket connectivity ─────────────────────────────────────────
 header(5, "Polymarket API connectivity")
-try:
-    if client is None:
-        fail("Skipped — client not initialised (fix Step 4 first)")
-    else:
-        result = client.get_ok()
-        if result:
-            ok("Polymarket API reachable")
+if dry_run:
+    warn("DRY RUN mode — skipping connectivity check.")
+    passed += 1
+else:
+    try:
+        if client is None:
+            fail("Skipped — client not initialised (fix Step 4 first)")
         else:
-            fail(f"Polymarket API unreachable: unexpected response {result}")
-except Exception as e:
-    fail(f"Polymarket API unreachable: {e}")
+            result = client.get_ok()
+            if result:
+                ok("Polymarket API reachable")
+            else:
+                fail(f"Polymarket API unreachable: unexpected response {result}")
+    except Exception as e:
+        fail(f"Polymarket API unreachable: {e}")
 
 # ── Step 6 — Wallet balance ───────────────────────────────────────────────────
 header(6, "Wallet balance")
-try:
-    if client is None:
-        fail("Skipped — client not initialised (fix Step 4 first)")
-    else:
-        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-        result = client.get_balance_allowance(
-            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-        )
-        balance = float(result.get("balance", 0))
-        ok(f"Wallet balance: ${balance:.2f} USDC")
-        if balance == 0:
-            warn("Balance is $0. Fund your wallet before going live.")
-            print(f"       Deposit USDC (Polygon network) to: {os.getenv('POLYMARKET_FUNDER', '')}")
-except Exception as e:
-    fail(f"Could not fetch balance: {e}")
+if dry_run:
+    warn("DRY RUN mode — skipping balance check.")
+    passed += 1
+else:
+    try:
+        if client is None:
+            fail("Skipped — client not initialised (fix Step 4 first)")
+        else:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            result = client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            balance = float(result.get("balance", 0))
+            ok(f"Wallet balance: ${balance:.2f} USDC")
+            if balance == 0:
+                warn("Balance is $0. Fund your wallet before going live.")
+                print(f"       Deposit USDC (Polygon network) to: {os.getenv('POLYMARKET_FUNDER', '')}")
+    except Exception as e:
+        fail(f"Could not fetch balance: {e}")
 
 # ── Step 7 — Telegram connectivity ───────────────────────────────────────────
 header(7, "Telegram connectivity")
