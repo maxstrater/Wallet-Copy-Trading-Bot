@@ -62,19 +62,18 @@ else:
 
     # Step 2: Dependency check — missing package
     def test_step2_missing_package_fails(self):
-        original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
         import builtins
         real_import = builtins.__import__
 
         def mock_import(name, *args, **kwargs):
-            if name == "web3":
-                raise ImportError("No module named 'web3'")
+            if name == "schedule":
+                raise ImportError("No module named 'schedule'")
             return real_import(name, *args, **kwargs)
 
         with patch("builtins.__import__", side_effect=mock_import):
             p, f = 0, 0
             try:
-                import web3
+                import schedule
             except ImportError:
                 f += 1
         self.assertEqual(f, 1)

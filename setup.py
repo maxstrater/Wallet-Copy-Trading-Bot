@@ -52,7 +52,6 @@ else:
 header(2, "Dependency check")
 PACKAGES = [
     ("py_clob_client", "py-clob-client"),
-    ("web3",           "web3"),
     ("dotenv",         "python-dotenv"),
     ("requests",       "requests"),
     ("telegram",       "python-telegram-bot"),
