@@ -40,9 +40,10 @@ class NewTrade:
 class WalletMonitor:
     def __init__(self, config: Config):
         self.config = config
-        self._last_seen: Dict[str, str] = {}  # wallet_address -> ISO timestamp
-        self._market_cache: Dict[str, dict] = {}  # condition_id -> market data
+        self._last_seen: Dict[str, str] = {}       # wallet_address -> ISO timestamp
+        self._market_cache: Dict[str, dict] = {}   # condition_id -> market data
         self._market_cache_ts: Dict[str, datetime] = {}  # condition_id -> cached at
+        self._wallet_failures: Dict[str, int] = {} # wallet_address -> consecutive failure count
         self._poll_count = 0
 
     def _load_wallets(self) -> List[dict]:
@@ -89,13 +90,21 @@ class WalletMonitor:
         now = datetime.now(tz=timezone.utc)
         cached_at = self._market_cache_ts.get(condition_id)
         if cached_at and (now - cached_at).total_seconds() < MARKET_CACHE_TTL_SECONDS:
-            log.debug("market_cache_hit", condition_id=condition_id)
+            log.info("market_cache_hit", condition_id=condition_id[:12] + "...")
             return self._market_cache.get(condition_id)
 
-        market = self._fetch_market_raw(condition_id)
+        log.info("api_call", endpoint="gamma-api", condition_id=condition_id[:12] + "...")
+        try:
+            market = self._fetch_market_raw(condition_id)
+        except requests.exceptions.RequestException as e:
+            log.warning("api_error", endpoint="gamma-api", condition_id=condition_id[:12] + "...", error=str(e))
+            raise
         if market:
             self._market_cache[condition_id] = market
             self._market_cache_ts[condition_id] = now
+            log.info("api_ok", endpoint="gamma-api", question=str(market.get("question", "?"))[:50])
+        else:
+            log.warning("api_no_data", endpoint="gamma-api", condition_id=condition_id[:12] + "...")
         return market
 
     def _parse_closes_at(self, market: dict) -> Optional[datetime]:
@@ -171,48 +180,92 @@ class WalletMonitor:
         label = wallet.get("label", address[:8])
         new_trades: List[NewTrade] = []
 
+        log.info("checking_wallet", wallet=label, address=address[:10] + "...")
+
+        log.info("api_call", endpoint="data-api", wallet=label)
         try:
             activities = self._fetch_activity(address)
+            log.info("api_ok", endpoint="data-api", wallet=label, activities=len(activities))
         except requests.exceptions.RequestException as e:
-            log.warning("wallet_fetch_failed", wallet=address, error=str(e))
+            log.warning("api_error", endpoint="data-api", wallet=label, error=str(e))
+            self._wallet_failures[address] = self._wallet_failures.get(address, 0) + 1
+            consecutive = self._wallet_failures[address]
+            if consecutive >= 3:
+                log.warning(
+                    "wallet_api_repeated_failure",
+                    wallet=label,
+                    consecutive_failures=consecutive,
+                    message="This wallet's API calls have been failing repeatedly",
+                )
             return []
+
+        # Reset failure counter on success
+        self._wallet_failures[address] = 0
 
         last_seen = self._last_seen.get(address)
         newest_ts: Optional[str] = last_seen
+        new_activity_count = 0
+        filtered_counts: dict = {}
 
         for activity in activities:
-            ts = activity.get("timestamp") or activity.get("createdAt") or ""
+            raw_ts = activity.get("timestamp") or activity.get("createdAt") or ""
+            # Normalise to ISO string regardless of whether API returns int or str
+            if isinstance(raw_ts, (int, float)):
+                ts = datetime.fromtimestamp(raw_ts, tz=timezone.utc).isoformat()
+            else:
+                ts = str(raw_ts)
 
             if last_seen and ts and ts <= last_seen:
                 continue
 
+            new_activity_count += 1
+
             if newest_ts is None or (ts and ts > newest_ts):
                 newest_ts = ts
 
+            # Filter: must be a trade
             if activity.get("type") != "trade":
+                reason = f"type={activity.get('type', '?')}"
+                filtered_counts[reason] = filtered_counts.get(reason, 0) + 1
                 continue
+
+            # Filter: outcome must be YES/NO
             if activity.get("outcome", "").upper() not in ("YES", "NO"):
+                reason = f"outcome={activity.get('outcome', '?')}"
+                filtered_counts[reason] = filtered_counts.get(reason, 0) + 1
                 continue
+
+            # Filter: minimum size
             size_usdc = float(activity.get("usdcSize", 0) or 0)
             if size_usdc < MIN_TRADE_SIZE_USDC:
+                reason = f"size_too_small (${size_usdc:.0f})"
+                filtered_counts[reason] = filtered_counts.get(reason, 0) + 1
                 continue
 
             condition_id = activity.get("conditionId", "")
             if not condition_id:
+                filtered_counts["no_condition_id"] = filtered_counts.get("no_condition_id", 0) + 1
                 continue
 
             try:
                 market = self._get_market(condition_id)
             except requests.exceptions.RequestException as e:
-                log.warning("market_fetch_failed", condition_id=condition_id, error=str(e))
+                log.warning("api_error", endpoint="gamma-api", wallet=label, condition_id=condition_id[:12] + "...", error=str(e))
                 continue
 
             if market is None:
+                filtered_counts["no_market_data"] = filtered_counts.get("no_market_data", 0) + 1
                 continue
 
             valid, reason = self._is_market_valid(market)
             if not valid:
-                log.debug("trade_filtered", wallet=label, reason=reason)
+                log.info(
+                    "trade_filtered",
+                    wallet=label,
+                    reason=reason,
+                    question=str(market.get("question", "?"))[:45],
+                )
+                filtered_counts[reason] = filtered_counts.get(reason, 0) + 1
                 continue
 
             trade = self._process_activity(activity, wallet, market)
@@ -230,12 +283,36 @@ class WalletMonitor:
         if newest_ts:
             self._last_seen[address] = newest_ts
 
+        if new_activity_count == 0:
+            log.info("wallet_no_new_activity", wallet=label)
+        else:
+            log.info(
+                "wallet_done",
+                wallet=label,
+                new_activity=new_activity_count,
+                new_trades=len(new_trades),
+                filtered=sum(filtered_counts.values()),
+                filter_reasons=str(filtered_counts) if filtered_counts else "none",
+            )
+
         return new_trades
+
+    def get_wallet_failures(self) -> Dict[str, int]:
+        """Return dict of wallet_address -> consecutive failure count for wallets with failures."""
+        return {addr: count for addr, count in self._wallet_failures.items() if count > 0}
 
     def poll(self) -> List[NewTrade]:
         self._poll_count += 1
         wallets = self._load_wallets()
-        log.info("poll_starting", poll=self._poll_count, wallets=len(wallets))
+
+        sep = "─" * 50
+        print(f"\n{sep}")
+        log.info(
+            "poll_start",
+            poll=self._poll_count,
+            wallets=len(wallets),
+            next_poll_in=f"{self.config.poll_interval_seconds}s",
+        )
 
         all_new_trades: List[NewTrade] = []
 
@@ -245,7 +322,30 @@ class WalletMonitor:
             if i < len(wallets) - 1:
                 time.sleep(1.0)
 
-        log.info("poll_complete", poll=self._poll_count, new_trades=len(all_new_trades))
+        # Summarise any wallets with ongoing failures
+        failing = self.get_wallet_failures()
+        if failing:
+            for addr, count in failing.items():
+                label = next((w.get("label", addr[:8]) for w in wallets if w["address"] == addr), addr[:8])
+                log.warning("wallet_api_failing", wallet=label, consecutive_failures=count)
+
+        if all_new_trades:
+            log.info(
+                "poll_complete",
+                poll=self._poll_count,
+                new_trades=len(all_new_trades),
+                wallets_with_errors=len(failing),
+            )
+        else:
+            log.info(
+                "poll_complete",
+                poll=self._poll_count,
+                new_trades=0,
+                status="nothing new this cycle",
+                wallets_with_errors=len(failing),
+            )
+        print(sep)
+
         return all_new_trades
 
     def run_forever(self, callback: Callable[[NewTrade], None]) -> None:

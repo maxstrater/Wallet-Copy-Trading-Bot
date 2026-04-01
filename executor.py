@@ -54,13 +54,15 @@ class Executor:
         log.debug("executor_initialized")
 
     def get_balance(self) -> float:
-        log.debug("get_balance_enter")
+        if self._client is None:
+            # Dry-run mode — no live client, balance is irrelevant
+            return 0.0
         try:
             result = self._client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
             balance = float(result.get("balance", 0))
-            log.debug("get_balance_exit", balance=balance)
+            log.info("balance_check", balance=f"${balance:.2f}")
             return balance
         except Exception as e:
             log.warning("get_balance_failed", error=str(e))

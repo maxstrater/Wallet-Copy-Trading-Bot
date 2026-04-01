@@ -55,9 +55,18 @@ class WalletScorer:
         all_activities = []
         offset = 0
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+        page_num = 0
 
         while len(all_activities) < MAX_TRADES_TO_FETCH:
-            page = self._fetch_activity_page(address, offset)
+            page_num += 1
+            log.info("api_call", endpoint="data-api", wallet=address[:10] + "...", page=page_num, offset=offset)
+            try:
+                page = self._fetch_activity_page(address, offset)
+                log.info("api_ok", endpoint="data-api", wallet=address[:10] + "...", page=page_num, results=len(page))
+            except requests.exceptions.RequestException as e:
+                log.warning("api_error", endpoint="data-api", wallet=address[:10] + "...", page=page_num, error=str(e))
+                raise
+
             if not page:
                 break
             all_activities.extend(page)
@@ -67,22 +76,23 @@ class WalletScorer:
             oldest_ts = page[-1].get("timestamp") or page[-1].get("createdAt") or ""
             if oldest_ts:
                 try:
-                    oldest_dt = datetime.fromisoformat(
-                        oldest_ts.replace("Z", "+00:00")
-                    ).astimezone(timezone.utc)
-                    if oldest_dt < cutoff:
+                    oldest_dt = self._parse_ts(oldest_ts)
+                    if oldest_dt and oldest_dt < cutoff:
+                        log.info("scorer_pagination_stop", reason="beyond_90_day_window", total=len(all_activities))
                         break
-                except ValueError:
+                except Exception:
                     pass
             offset += PAGE_SIZE
             time.sleep(0.5)
 
+        log.info("scorer_fetch_complete", wallet=address[:10] + "...", total_activities=len(all_activities))
         return all_activities
 
     @retry_with_backoff(max_retries=3, base_delay=2)
     def _fetch_market(self, condition_id: str) -> Optional[dict]:
         if condition_id in self._market_cache:
             return self._market_cache[condition_id]
+        log.info("api_call", endpoint="gamma-api", condition_id=condition_id[:12] + "...")
         resp = requests.get(
             GAMMA_API_URL,
             params={"id": condition_id},
@@ -97,14 +107,19 @@ class WalletScorer:
             market = data
         if market:
             self._market_cache[condition_id] = market
+            log.info("api_ok", endpoint="gamma-api", condition_id=condition_id[:12] + "...", resolved=market.get("resolved", "?"))
+        else:
+            log.warning("api_no_data", endpoint="gamma-api", condition_id=condition_id[:12] + "...")
         return market
 
-    def _parse_ts(self, ts: str) -> Optional[datetime]:
+    def _parse_ts(self, ts) -> Optional[datetime]:
         if not ts:
             return None
         try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
-        except ValueError:
+            if isinstance(ts, (int, float)):
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
+            return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone(timezone.utc)
+        except (ValueError, OSError, OverflowError):
             return None
 
     def _filter_to_window(self, activities: List[dict]) -> List[dict]:
@@ -131,19 +146,25 @@ class WalletScorer:
         return wallet_side == winning_side
 
     def score_wallet(self, wallet_address: str) -> Optional[WalletScore]:
+        log.info("scoring_wallet", wallet=wallet_address[:10] + "...", note="fetching up to 500 trades (may take ~30s)")
         try:
             raw_activities = self._fetch_all_activity(wallet_address)
         except requests.exceptions.RequestException as e:
-            log.warning("scorer_fetch_failed", wallet=wallet_address, error=str(e))
+            log.warning("scorer_fetch_failed", wallet=wallet_address[:10] + "...", error=str(e))
             return None
 
-        trades = [
-            a for a in self._filter_to_window(raw_activities)
-            if a.get("type") == "trade"
-        ]
+        windowed = self._filter_to_window(raw_activities)
+        trades = [a for a in windowed if a.get("type") == "trade"]
 
         if not trades:
-            log.warning("scorer_no_trades", wallet=wallet_address)
+            from collections import Counter
+            type_counts = dict(Counter(a.get("type", "?") for a in windowed))
+            log.warning(
+                "scorer_no_trades",
+                wallet=wallet_address[:10] + "...",
+                total_activities_in_window=len(windowed),
+                activity_types_seen=str(type_counts),
+            )
             return None
 
         total_bets = len(trades)

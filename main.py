@@ -245,14 +245,31 @@ def main():
             log.error("on_new_trade_error", error=str(e), traceback=traceback.format_exc())
             alerts.send_error_alert("on_new_trade", str(e))
 
+    # Track which wallets have already had a Telegram alert sent for API failures
+    _alerted_wallets: set = set()
+
     try:
         while True:
             schedule.run_pending()
             try:
                 new_trades = monitor.poll()
                 consecutive_failures = 0
+
+                # Check for wallets with repeated API failures and alert via Telegram
+                for addr, fail_count in monitor.get_wallet_failures().items():
+                    wallet_label = next(
+                        (w.get("label", addr[:8]) for w in load_wallets() if w["address"] == addr),
+                        addr[:8],
+                    )
+                    # Alert at 3 failures, then again every 10 after that
+                    alert_key = (addr, (fail_count // 10) if fail_count >= 3 else (1 if fail_count >= 3 else 0))
+                    if fail_count >= 3 and alert_key not in _alerted_wallets:
+                        _alerted_wallets.add(alert_key)
+                        alerts.send_api_warning(wallet_label, fail_count)
+
                 for trade in new_trades:
                     on_new_trade(trade)
+
             except Exception as e:
                 consecutive_failures += 1
                 log.error("poll_failed", error=str(e), consecutive=consecutive_failures)
@@ -261,6 +278,7 @@ def main():
                     sys.exit(1)
 
             poll_count += 1
+            log.info("sleeping", seconds=config.poll_interval_seconds, poll=poll_count)
             time.sleep(config.poll_interval_seconds)
 
     except KeyboardInterrupt:

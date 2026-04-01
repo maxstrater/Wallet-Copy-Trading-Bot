@@ -108,3 +108,14 @@ class AlertManager:
             f"Error: {error}"
         )
         self._send(text)
+
+    def send_api_warning(self, wallet_label: str, consecutive_failures: int, error: str = "") -> None:
+        """Alert when a wallet's API calls have been failing repeatedly."""
+        text = (
+            f"⚠️ <b>API Warning</b>\n"
+            f"Wallet <b>{wallet_label}</b> has failed {consecutive_failures} polls in a row.\n"
+            f"The bot is still running but skipping this wallet.\n"
+        )
+        if error:
+            text += f"Last error: {error}"
+        self._send(text)

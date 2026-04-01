@@ -1,3 +1,12 @@
 {
-  "wallets": []
+    "wallets": [
+        {
+            "address": "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1",
+            "label": "whale_1"
+        },
+        {
+            "address": "0x204f72f35326db932158cba6adff0b9a1da95e14",
+            "label": "whale_2"
+        }
+    ]
 }
