@@ -10,17 +10,19 @@ from utils import log, format_usdc, time_until, pct
 class AlertManager:
     def __init__(self, config: Config):
         self.config = config
-        self.bot = Bot(token=config.telegram_bot_token)
         self.chat_id = config.telegram_chat_id
 
     def _send(self, text: str) -> None:
         try:
             import asyncio
-            asyncio.run(self.bot.send_message(
-                chat_id=self.chat_id,
-                text=text,
-                parse_mode="HTML",
-            ))
+            async def _do_send():
+                async with Bot(token=self.config.telegram_bot_token) as bot:
+                    await bot.send_message(
+                        chat_id=self.chat_id,
+                        text=text,
+                        parse_mode="HTML",
+                    )
+            asyncio.run(_do_send())
         except Exception as e:
             log.warning("telegram_send_failed", error=str(e))
 
@@ -74,7 +76,13 @@ class AlertManager:
 
         open_positions = db.get_open_positions()
         total_exposure = sum(float(p.get("size_usdc", 0) or 0) for p in open_positions)
-        pnl = sum(float(p.get("pnl_usdc", 0) or 0) for p in open_positions)
+        unrealised_pnl = sum(float(p.get("pnl_usdc", 0) or 0) for p in open_positions)
+
+        settled = db.get_settled_pnl_summary(hours=24)
+        settled_count = settled.get("settled_count") or 0
+        realised_pnl = float(settled.get("total_pnl") or 0)
+        winners = settled.get("winners") or 0
+        losers = settled.get("losers") or 0
 
         date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
         text = (
@@ -82,10 +90,30 @@ class AlertManager:
             f"\n"
             f"Trades copied: {copies}\n"
             f"Trades skipped: {skips}\n"
-            f"Estimated P&L today: {format_usdc(pnl)}\n"
+            f"\n"
             f"Open positions: {len(open_positions)}\n"
             f"Portfolio exposure: {format_usdc(total_exposure)}\n"
-            f"Bot status: Running ✓"
+            f"Unrealised P&L: {format_usdc(unrealised_pnl)}\n"
+        )
+        if settled_count > 0:
+            text += (
+                f"\n"
+                f"Settled today: {settled_count} ({winners}W / {losers}L)\n"
+                f"Realised P&L: <b>{'+' if realised_pnl >= 0 else ''}{format_usdc(realised_pnl)}</b>\n"
+            )
+        text += f"\nBot status: Running ✓"
+        self._send(text)
+
+    def send_position_closed_alert(self, pos) -> None:
+        won_emoji = "✅" if pos.won else "❌"
+        result_label = "WIN" if pos.won else "LOSS"
+        pnl_str = f"{'+' if pos.pnl_usdc >= 0 else ''}{format_usdc(pos.pnl_usdc)}"
+        text = (
+            f"[DRY RUN] 🏁 <b>Position Settled</b> — {won_emoji}\n"
+            f"\n"
+            f"📋 <b>{pos.question[:80]}</b>\n"
+            f"📊 Side: <b>{pos.side}</b> | Entry: ${pos.entry_price:.2f} | Size: {format_usdc(pos.size_usdc)}\n"
+            f"💰 P&amp;L: <b>{pnl_str}</b>  {result_label} {won_emoji}"
         )
         self._send(text)
 

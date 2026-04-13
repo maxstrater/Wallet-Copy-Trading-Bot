@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project
 
 Polymarket wallet copy-trading bot — monitors target wallets on Polymarket and mirrors their trades automatically.
+This is a Polymarket copy-trading bot written in Python. Key components: wallet scoring, trade filtering, Telegram alerts, dry-run mode. Always check API response field names and case sensitivity against actual Polymarket API responses (e.g., outcomes may be 'Over/Under' not 'YES/NO').
 
 ## Commands
 
@@ -29,6 +30,13 @@ ENV_FILE=.env.prod python main.py
 ## Environment
 
 Copy `.env.example` to `.env` and fill in values before running.
+
+## Editing Rules
+When fixing bugs, always verify the fix doesn't break existing functionality - especially Telegram connectivity and API integrations. Run the bot in dry-run mode after any changes to confirm no regressions.
+
+## Testing 
+After making edits, run `python -c 'from <module> import *'` on changed modules to catch import errors and scoping issues before telling the user the fix is done.
+
 
 ## Prompt 1
 "Create a Python project scaffold for a Polymarket wallet copy-trading bot.
@@ -1003,3 +1011,4 @@ STEP 10 — Final summary:
   Else:
     Print:
       "⚠️  Fix the issues above before starting the bot.""
+

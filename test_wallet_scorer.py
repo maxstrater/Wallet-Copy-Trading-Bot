@@ -43,13 +43,18 @@ def make_activity(outcome="YES", size=100, price=0.55, days_ago=1, condition_id=
 
 
 def make_resolved_market(resolved_yes=True, condition_id="cond1"):
+    # outcomePrices: index 0 = YES price, index 1 = NO price
+    outcome_prices = '["1", "0"]' if resolved_yes else '["0", "1"]'
     return [{
         "id": "mkt1",
         "question": "Will BTC hit 100k?",
         "category": "crypto",
         "liquidity": 5000,
+        "closed": True,
         "resolved": True,
         "resolvedYes": resolved_yes,
+        "outcomePrices": outcome_prices,
+        "outcomes": '["YES", "NO"]',
         "endDate": _ts(days_ago=-30),
         "conditionId": condition_id,
     }]
@@ -75,7 +80,7 @@ class TestWalletScorer(unittest.TestCase):
                 else:
                     r.json.return_value = []
             else:
-                cid = (params or {}).get("id", "cond1")
+                cid = (params or {}).get("condition_ids", "cond1")
                 if market_fn:
                     r.json.return_value = market_fn(cid)
                 else:
@@ -92,12 +97,12 @@ class TestWalletScorer(unittest.TestCase):
         )
 
         def market_fn(cid):
-            idx = int(cid.replace("cond", ""))
             # YES bets (cond1-6) on YES-resolving markets = win
             # NO bets (cond7-10) on YES-resolving markets = loss
             return [{"id": "mkt1", "question": "Q?", "category": "crypto",
-                     "liquidity": 5000, "resolved": True,
-                     "resolvedYes": True,
+                     "liquidity": 5000, "closed": True, "resolved": True,
+                     "resolvedYes": True, "outcomePrices": '["1", "0"]',
+                     "outcomes": '["YES", "NO"]',
                      "endDate": _ts(days_ago=-30)}]
 
         with patch("requests.get", side_effect=self._mock_get(activities, market_fn)):
@@ -119,7 +124,9 @@ class TestWalletScorer(unittest.TestCase):
 
         def market_fn(cid):
             return [{"id": "mkt1", "question": "Q?", "category": "crypto",
-                     "liquidity": 5000, "resolved": True, "resolvedYes": True,
+                     "liquidity": 5000, "closed": True, "resolved": True,
+                     "resolvedYes": True, "outcomePrices": '["1", "0"]',
+                     "outcomes": '["YES", "NO"]',
                      "endDate": _ts(days_ago=-30)}]
 
         with patch("requests.get", side_effect=self._mock_get(activities, market_fn)):
@@ -147,10 +154,11 @@ class TestWalletScorer(unittest.TestCase):
         ]
 
         def market_fn(cid):
-            idx = int(cid[1:])
             # cid c5 = NO bet on YES-resolving market = loss
             return [{"id": "mkt1", "question": "Q?", "category": "crypto",
-                     "liquidity": 5000, "resolved": True, "resolvedYes": True,
+                     "liquidity": 5000, "closed": True, "resolved": True,
+                     "resolvedYes": True, "outcomePrices": '["1", "0"]',
+                     "outcomes": '["YES", "NO"]',
                      "endDate": _ts(days_ago=-30)}]
 
         with patch("requests.get", side_effect=self._mock_get(activities, market_fn)):
@@ -171,7 +179,8 @@ class TestWalletScorer(unittest.TestCase):
         self.assertGreaterEqual(score.composite_score, 0.0)
         self.assertLessEqual(score.composite_score, 1.0)
 
-    # Test 5: returns None when fewer than 10 resolved trades
+    # Test 5: returns partial score (not None) when fewer than MIN_RESOLVED_TRADES resolved trades
+    # win_rate defaults to 0.0 so decision engine gate 2 will reject it
     def test_returns_none_when_insufficient_resolved_trades(self):
         activities = [
             make_activity("YES", days_ago=i, condition_id=f"c{i}") for i in range(1, 6)
@@ -179,13 +188,16 @@ class TestWalletScorer(unittest.TestCase):
         # Markets are unresolved → no resolved outcomes
         def market_fn(cid):
             return [{"id": "mkt1", "question": "Q?", "category": "crypto",
-                     "liquidity": 5000, "resolved": False,
+                     "liquidity": 5000, "closed": False, "resolved": False,
                      "endDate": _ts(days_ago=-30)}]
 
         with patch("requests.get", side_effect=self._mock_get(activities, market_fn)):
             score = self.scorer.score_wallet("0xabc")
 
-        self.assertIsNone(score)
+        # No longer returns None — returns partial score with win_rate=0
+        self.assertIsNotNone(score)
+        self.assertEqual(score.win_rate, 0.0)
+        self.assertEqual(score.total_bets, 5)
 
     def tearDown(self):
         self.scorer._market_cache.clear()

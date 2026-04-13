@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS wallet_scores (
     avg_bet_size REAL,
     market_categories TEXT,
     hot_streak INTEGER,
+    recency_weight REAL,
+    composite_score REAL,
     last_updated DATETIME
 )
 """
@@ -70,6 +72,21 @@ def init_db():
         conn.execute(CREATE_WALLET_SCORES)
         conn.execute(CREATE_POSITIONS)
         conn.execute(CREATE_SIGNAL_LOG)
+        # Migrate: add columns that may be missing from older DB files
+        for col, typedef in [("recency_weight", "REAL"), ("composite_score", "REAL")]:
+            try:
+                conn.execute(f"ALTER TABLE wallet_scores ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass
+        for col, typedef in [
+            ("condition_id",  "TEXT"),
+            ("question",      "TEXT"),
+            ("is_simulated",  "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
@@ -117,8 +134,9 @@ def upsert_wallet_score(score: dict):
         conn.execute(
             """
             INSERT INTO wallet_scores (wallet_address, win_rate, total_bets, avg_roi,
-                consistency_score, avg_bet_size, market_categories, hot_streak, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                consistency_score, avg_bet_size, market_categories, hot_streak,
+                recency_weight, composite_score, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(wallet_address) DO UPDATE SET
                 win_rate=excluded.win_rate,
                 total_bets=excluded.total_bets,
@@ -127,6 +145,8 @@ def upsert_wallet_score(score: dict):
                 avg_bet_size=excluded.avg_bet_size,
                 market_categories=excluded.market_categories,
                 hot_streak=excluded.hot_streak,
+                recency_weight=excluded.recency_weight,
+                composite_score=excluded.composite_score,
                 last_updated=excluded.last_updated
             """,
             (
@@ -138,6 +158,8 @@ def upsert_wallet_score(score: dict):
                 score.get("avg_bet_size"),
                 score.get("market_categories"),
                 score.get("hot_streak"),
+                score.get("recency_weight"),
+                score.get("composite_score"),
                 datetime.utcnow().isoformat(),
             ),
         )
@@ -192,6 +214,48 @@ def log_signals(trade_id: int, signals: list[dict]):
             ],
         )
         conn.commit()
+
+
+def get_open_simulated_positions() -> list:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            "SELECT * FROM positions WHERE closed_at IS NULL AND is_simulated = 1"
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def close_position(position_id: int, pnl_usdc: float, closed_at: str, final_price: float):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE positions
+            SET pnl_usdc = ?, closed_at = ?, current_price = ?
+            WHERE id = ?
+            """,
+            (pnl_usdc, closed_at, final_price, position_id),
+        )
+        conn.commit()
+
+
+def get_settled_pnl_summary(hours: int = 24) -> dict:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cursor = conn.execute(
+            """
+            SELECT
+                COUNT(*)                                          AS settled_count,
+                COALESCE(SUM(pnl_usdc), 0.0)                    AS total_pnl,
+                SUM(CASE WHEN pnl_usdc > 0 THEN 1 ELSE 0 END)   AS winners,
+                SUM(CASE WHEN pnl_usdc <= 0 THEN 1 ELSE 0 END)  AS losers
+            FROM positions
+            WHERE closed_at >= ? AND is_simulated = 1
+            """,
+            (since,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else {"settled_count": 0, "total_pnl": 0.0, "winners": 0, "losers": 0}
 
 
 def get_recent_copies(hours: int = 24) -> list:

@@ -22,6 +22,7 @@ def make_trade():
     t = MagicMock()
     t.market_id = "mkt1"
     t.token_id = "tok1"
+    t.condition_id = "cond1"
     t.side = "YES"
     t.size_usdc = 50.0
     t.price = 0.55

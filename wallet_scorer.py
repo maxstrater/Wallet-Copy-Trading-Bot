@@ -16,7 +16,7 @@ GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
 
 SCORE_TTL_HOURS = 6
 LOOKBACK_DAYS = 90
-MIN_RESOLVED_TRADES = 10
+MIN_RESOLVED_TRADES = 3
 MAX_TRADES_TO_FETCH = 500
 PAGE_SIZE = 100
 
@@ -95,7 +95,7 @@ class WalletScorer:
         log.info("api_call", endpoint="gamma-api", condition_id=condition_id[:12] + "...")
         resp = requests.get(
             GAMMA_API_URL,
-            params={"id": condition_id},
+            params={"condition_ids": condition_id},
             timeout=10,
         )
         resp.raise_for_status()
@@ -107,7 +107,7 @@ class WalletScorer:
             market = data
         if market:
             self._market_cache[condition_id] = market
-            log.info("api_ok", endpoint="gamma-api", condition_id=condition_id[:12] + "...", resolved=market.get("resolved", "?"))
+            log.info("api_ok", endpoint="gamma-api", condition_id=condition_id[:12] + "...", closed=market.get("closed", "?"))
         else:
             log.warning("api_no_data", endpoint="gamma-api", condition_id=condition_id[:12] + "...")
         return market
@@ -134,16 +134,61 @@ class WalletScorer:
 
     def _determine_outcome(self, activity: dict, market: dict) -> Optional[bool]:
         """Returns True if the bet won, False if lost, None if unresolvable."""
-        if not market.get("resolved", False):
+        if not market.get("closed", False):
             return None
-        wallet_side = activity.get("outcome", "").upper()
-        if wallet_side not in ("YES", "NO"):
+        # outcomePrices is a JSON string like '["1", "0"]' or list ["1","0"]
+        # Index 0 = first outcome price, index 1 = second. Winner has price "1".
+        outcome_prices = market.get("outcomePrices", [])
+        if isinstance(outcome_prices, str):
+            import json as _json
+            try:
+                outcome_prices = _json.loads(outcome_prices)
+            except Exception:
+                return None
+        if len(outcome_prices) < 2:
             return None
-        resolved_yes = market.get("resolvedYes", market.get("resolved_yes"))
-        if resolved_yes is None:
+
+        # Find which index won (price >= 0.99)
+        winning_index = None
+        for i, p in enumerate(outcome_prices):
+            try:
+                if float(p) >= 0.99:
+                    winning_index = i
+                    break
+            except (ValueError, TypeError):
+                continue
+        if winning_index is None:
+            return None  # market closed but not yet resolved to a definitive winner
+
+        # Map the wallet's outcome label to an index via the outcomes array
+        wallet_outcome = activity.get("outcome", "")
+        outcomes = market.get("outcomes", [])
+        if isinstance(outcomes, str):
+            import json as _json
+            try:
+                outcomes = _json.loads(outcomes)
+            except Exception:
+                outcomes = []
+
+        if outcomes and wallet_outcome:
+            # Try to find by label match (case-insensitive)
+            for i, label in enumerate(outcomes):
+                if str(label).upper() == wallet_outcome.upper():
+                    return i == winning_index
+            # Fall back: "YES" maps to index 0, "NO" maps to index 1
+            if wallet_outcome.upper() == "YES":
+                return 0 == winning_index
+            if wallet_outcome.upper() == "NO":
+                return 1 == winning_index
             return None
-        winning_side = "YES" if resolved_yes else "NO"
-        return wallet_side == winning_side
+        else:
+            # No outcomes array — fall back to YES/NO convention
+            wallet_side = wallet_outcome.upper()
+            if wallet_side == "YES":
+                return 0 == winning_index
+            if wallet_side == "NO":
+                return 1 == winning_index
+            return None
 
     def score_wallet(self, wallet_address: str) -> Optional[WalletScore]:
         log.info("scoring_wallet", wallet=wallet_address[:10] + "...", note="fetching up to 500 trades (may take ~30s)")
@@ -154,10 +199,9 @@ class WalletScorer:
             return None
 
         windowed = self._filter_to_window(raw_activities)
-        trades = [a for a in windowed if a.get("type") == "trade"]
+        trades = [a for a in windowed if a.get("type", "").upper() == "TRADE"]
 
         if not trades:
-            from collections import Counter
             type_counts = dict(Counter(a.get("type", "?") for a in windowed))
             log.warning(
                 "scorer_no_trades",
@@ -214,21 +258,42 @@ class WalletScorer:
             roi = (1.0 - price) / price if outcome and price > 0 else -1.0
             resolved_outcomes.append((outcome, roi, dt, category))
 
-        # --- Win rate ---
+        # --- Win rate, avg_roi, consistency_score ---
+        if resolved_outcomes:
+            wins = sum(1 for won, *_ in resolved_outcomes if won)
+            win_rate = wins / len(resolved_outcomes)
+            avg_roi = float(np.mean([roi for _, roi, *_ in resolved_outcomes]))
+
+            bucket_win_rates = []
+            for bucket_idx in range(3):
+                bucket_start = now - timedelta(days=30 * (bucket_idx + 1))
+                bucket_end = now - timedelta(days=30 * bucket_idx)
+                bucket = [
+                    won for won, _, dt, _ in resolved_outcomes
+                    if bucket_start <= dt < bucket_end
+                ]
+                if len(bucket) >= 3:
+                    bucket_win_rates.append(sum(bucket) / len(bucket))
+
+            if len(bucket_win_rates) >= 2:
+                consistency_score = float(clamp(1.0 - float(np.std(bucket_win_rates)), 0.0, 1.0))
+            elif len(bucket_win_rates) == 1:
+                consistency_score = bucket_win_rates[0]
+            else:
+                consistency_score = 0.5
+        else:
+            win_rate = 0.0
+            avg_roi = 0.0
+            consistency_score = 0.5
+
         if len(resolved_outcomes) < MIN_RESOLVED_TRADES:
             log.warning(
                 "scorer_insufficient_data",
                 wallet=wallet_address,
                 resolved=len(resolved_outcomes),
                 required=MIN_RESOLVED_TRADES,
+                note="saving partial score; win_rate=0 will fail gate 2 until more data resolves",
             )
-            return None
-
-        wins = sum(1 for won, *_ in resolved_outcomes if won)
-        win_rate = wins / len(resolved_outcomes)
-
-        # --- avg_roi ---
-        avg_roi = float(np.mean([roi for _, roi, *_ in resolved_outcomes]))
 
         # --- avg_bet_size ---
         avg_bet_size = float(np.mean(bet_sizes)) if bet_sizes else 0.0
@@ -236,25 +301,6 @@ class WalletScorer:
         # --- market_categories ---
         cat_counter = Counter(categories)
         top_categories = ",".join(cat for cat, _ in cat_counter.most_common(3))
-
-        # --- consistency_score ---
-        bucket_win_rates = []
-        for bucket_idx in range(3):
-            bucket_start = now - timedelta(days=30 * (bucket_idx + 1))
-            bucket_end = now - timedelta(days=30 * bucket_idx)
-            bucket = [
-                won for won, _, dt, _ in resolved_outcomes
-                if bucket_start <= dt < bucket_end
-            ]
-            if len(bucket) >= 3:
-                bucket_win_rates.append(sum(bucket) / len(bucket))
-
-        if len(bucket_win_rates) >= 2:
-            consistency_score = float(clamp(1.0 - float(np.std(bucket_win_rates)), 0.0, 1.0))
-        elif len(bucket_win_rates) == 1:
-            consistency_score = bucket_win_rates[0]
-        else:
-            consistency_score = 0.5
 
         # --- hot_streak ---
         sorted_resolved = sorted(resolved_outcomes, key=lambda x: x[2], reverse=True)
@@ -306,6 +352,8 @@ class WalletScorer:
             "avg_bet_size": avg_bet_size,
             "market_categories": top_categories,
             "hot_streak": hot_streak,
+            "recency_weight": recency_weight,
+            "composite_score": composite_score,
             "last_updated": now.isoformat(),
         })
 
@@ -334,8 +382,8 @@ class WalletScorer:
             avg_bet_size=row["avg_bet_size"] or 0.0,
             market_categories=row["market_categories"] or "",
             hot_streak=row["hot_streak"] or 0,
-            recency_weight=0.0,   # not persisted; recalculated on next score_wallet call
-            composite_score=0.0,  # not persisted; recalculated on next score_wallet call
+            recency_weight=row.get("recency_weight") or 0.0,
+            composite_score=row.get("composite_score") or 0.0,
             last_updated=last_updated,
         )
 

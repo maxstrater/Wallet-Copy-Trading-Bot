@@ -41,6 +41,7 @@ def make_market(resolved=False, hours_to_close=48, liquidity=5000):
         "question": "Will BTC hit 100k?",
         "category": "crypto",
         "liquidity": liquidity,
+        "closed": resolved,   # monitor checks "closed", not "resolved"
         "resolved": resolved,
         "resolvedYes": False,
         "endDate": _future(hours_to_close),

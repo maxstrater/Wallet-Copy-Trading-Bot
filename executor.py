@@ -55,8 +55,8 @@ class Executor:
 
     def get_balance(self) -> float:
         if self._client is None:
-            # Dry-run mode — no live client, balance is irrelevant
-            return 0.0
+            # Dry-run mode — return simulated balance so capital gates don't block evaluation
+            return self.config.max_portfolio_exposure_usdc
         try:
             result = self._client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
@@ -213,12 +213,13 @@ class Executor:
     def _record_position(self, decision, filled_size: float, filled_price: float):
         now = datetime.now(tz=timezone.utc).isoformat()
         try:
-            with sqlite3.connect(DB_PATH) as conn:
+            with sqlite3.connect(db.DB_PATH) as conn:
                 conn.execute(
                     """
                     INSERT INTO positions (market_id, token_id, side, size_usdc,
-                        entry_price, current_price, pnl_usdc, opened_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 0.0, ?)
+                        entry_price, current_price, pnl_usdc, opened_at,
+                        condition_id, question, is_simulated)
+                    VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?)
                     """,
                     (
                         decision.trade.market_id,
@@ -228,6 +229,9 @@ class Executor:
                         filled_price,
                         filled_price,
                         now,
+                        decision.trade.condition_id,
+                        decision.trade.question,
+                        1 if self.config.dry_run else 0,
                     ),
                 )
                 conn.commit()

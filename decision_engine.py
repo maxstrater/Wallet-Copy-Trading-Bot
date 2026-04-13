@@ -74,9 +74,9 @@ class DecisionEngine:
             return self._skip("no_wallet_data", trade, wallet_score, signal_result)
 
         # GATE 2 — Wallet minimum quality
-        if (wallet_score.win_rate < self.config.min_wallet_win_rate or
-                wallet_score.total_bets < self.config.min_wallet_bets):
-            return self._skip("wallet_below_threshold", trade, wallet_score, signal_result)
+        # if (wallet_score.win_rate < self.config.min_wallet_win_rate or
+        #         wallet_score.total_bets < self.config.min_wallet_bets):
+        #     return self._skip("wallet_below_threshold", trade, wallet_score, signal_result)
 
         # GATE 3 — Minimum signal score
         if signal_result.final_score < self.config.min_signal_score:
@@ -117,7 +117,7 @@ class DecisionEngine:
         cap_by_room = self.config.max_portfolio_exposure_usdc - total_exposure
         final_size = round(min(base_size, cap_by_max, cap_by_pct, cap_by_room), 2)
 
-        if final_size < 10.0:
+        if final_size < 1.00:
             return self._skip("position_too_small", trade, wallet_score, signal_result)
 
         log.info(

@@ -16,6 +16,7 @@ from alerts import AlertManager
 from config import load_config
 from decision_engine import DecisionEngine
 from executor import Executor
+from pnl_tracker import PnlTracker
 from signal_engine import SignalEngine
 from utils import log
 from wallet_monitor import WalletMonitor
@@ -140,12 +141,13 @@ def main():
     db.init_db()
 
     # Initialise components
-    scorer   = WalletScorer(config)
-    signals  = SignalEngine(config)
-    engine   = DecisionEngine(config, signals)
-    monitor  = WalletMonitor(config)
-    executor = Executor(config)
-    alerts   = AlertManager(config)
+    scorer      = WalletScorer(config)
+    signals     = SignalEngine(config)
+    engine      = DecisionEngine(config, signals)
+    monitor     = WalletMonitor(config)
+    executor    = Executor(config)
+    alerts      = AlertManager(config)
+    pnl_tracker = PnlTracker(config)
 
     # ── Startup sequence ─────────────────────────────────────────────────────
 
@@ -187,6 +189,10 @@ def main():
     def shutdown(signum=None, frame=None):
         log.info("shutting_down")
         schedule.run_all()
+        if config.dry_run:
+            closed = pnl_tracker.check_resolutions()
+            for pos in closed:
+                alerts.send_position_closed_alert(pos)
         final_balance = executor.get_balance()
         alerts._send(f"🛑 Bot stopped. Final balance: ${final_balance:.2f}")
         sys.exit(0)
@@ -269,6 +275,11 @@ def main():
 
                 for trade in new_trades:
                     on_new_trade(trade)
+
+                if config.dry_run:
+                    closed = pnl_tracker.check_resolutions()
+                    for pos in closed:
+                        alerts.send_position_closed_alert(pos)
 
             except Exception as e:
                 consecutive_failures += 1

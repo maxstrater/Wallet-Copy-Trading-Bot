@@ -75,7 +75,7 @@ class WalletMonitor:
     def _fetch_market_raw(self, condition_id: str) -> Optional[dict]:
         resp = requests.get(
             GAMMA_API_URL,
-            params={"id": condition_id},
+            params={"condition_ids": condition_id},
             timeout=10,
         )
         resp.raise_for_status()
@@ -119,7 +119,7 @@ class WalletMonitor:
         return None
 
     def _is_market_valid(self, market: dict) -> tuple[bool, str]:
-        if market.get("resolved", False):
+        if market.get("closed", False):
             return False, "market_resolved"
 
         closes_at = self._parse_closes_at(market)
@@ -224,7 +224,7 @@ class WalletMonitor:
                 newest_ts = ts
 
             # Filter: must be a trade
-            if activity.get("type") != "trade":
+            if activity.get("type", "").upper() != "TRADE":
                 reason = f"type={activity.get('type', '?')}"
                 filtered_counts[reason] = filtered_counts.get(reason, 0) + 1
                 continue
