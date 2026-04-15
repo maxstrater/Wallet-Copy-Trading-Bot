@@ -57,6 +57,8 @@ class AlertManager:
     def send_skip_alert(self, decision) -> None:
         if decision.signal_score < 50:
             return
+        if decision.skip_reason == "max_exposure_reached" and decision.signal_score < 55:
+            return
 
         trade = decision.trade
         text = (
