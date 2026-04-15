@@ -53,6 +53,10 @@ class Executor:
             ))
         log.debug("executor_initialized")
 
+    @property
+    def client(self):
+        return self._client
+
     def get_balance(self) -> float:
         if self._client is None:
             # Dry-run mode — return simulated balance so capital gates don't block evaluation
@@ -218,8 +222,8 @@ class Executor:
                     """
                     INSERT INTO positions (market_id, token_id, side, size_usdc,
                         entry_price, current_price, pnl_usdc, opened_at,
-                        condition_id, question, is_simulated)
-                    VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?)
+                        condition_id, question, is_simulated, closes_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision.trade.market_id,
@@ -232,6 +236,7 @@ class Executor:
                         decision.trade.condition_id,
                         decision.trade.question,
                         1 if self.config.dry_run else 0,
+                        decision.trade.closes_at.isoformat() if hasattr(decision.trade.closes_at, 'isoformat') else str(decision.trade.closes_at),
                     ),
                 )
                 conn.commit()

@@ -17,6 +17,7 @@ from config import load_config
 from decision_engine import DecisionEngine
 from executor import Executor
 from pnl_tracker import PnlTracker
+from position_monitor import PositionMonitor
 from signal_engine import SignalEngine
 from utils import log
 from wallet_monitor import WalletMonitor
@@ -147,7 +148,8 @@ def main():
     monitor     = WalletMonitor(config)
     executor    = Executor(config)
     alerts      = AlertManager(config)
-    pnl_tracker = PnlTracker(config)
+    pnl_tracker      = PnlTracker(config)
+    position_monitor = PositionMonitor(config, executor.client, alerts)
 
     # ── Startup sequence ─────────────────────────────────────────────────────
 
@@ -179,6 +181,9 @@ def main():
     schedule.every(5).minutes.do(
         lambda: log.info("watchdog", status="alive",
                          uptime_seconds=int((datetime.now(tz=timezone.utc) - start_time).total_seconds()))
+    )
+    schedule.every(config.position_check_interval).seconds.do(
+        lambda: [alerts.send_exit_alert(r) for r in position_monitor.check_all_positions() if r.success]
     )
 
     # ── Health check server ──────────────────────────────────────────────────

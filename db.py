@@ -82,6 +82,7 @@ def init_db():
             ("condition_id",  "TEXT"),
             ("question",      "TEXT"),
             ("is_simulated",  "INTEGER DEFAULT 0"),
+            ("closes_at",     "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {typedef}")

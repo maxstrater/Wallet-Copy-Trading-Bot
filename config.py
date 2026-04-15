@@ -36,6 +36,9 @@ class Config:
     min_wallet_bets: int
     min_signal_score: int
     poll_interval_seconds: int
+    take_profit_pct: float
+    stop_loss_threshold: float
+    position_check_interval: int
 
 
 def load_config() -> Config:
@@ -68,4 +71,7 @@ def load_config() -> Config:
         min_wallet_bets=int(os.getenv("MIN_WALLET_BETS", "30")),
         min_signal_score=int(os.getenv("MIN_SIGNAL_SCORE", "65")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "30")),
+        take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.40")),
+        stop_loss_threshold=float(os.getenv("STOP_LOSS_THRESHOLD", "0.20")),
+        position_check_interval=int(os.getenv("POSITION_CHECK_INTERVAL", "300")),
     )

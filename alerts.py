@@ -137,6 +137,27 @@ class AlertManager:
         )
         self._send(text)
 
+    def send_exit_alert(self, result) -> None:
+        emoji = "✅" if result.pnl_usdc >= 0 else "🔴"
+        prefix = "[DRY RUN] " if result.dry_run else ""
+        pnl_str = f"{'+' if result.pnl_usdc >= 0 else ''}{format_usdc(result.pnl_usdc)}"
+        reason_labels = {
+            "take_profit_strong": "Take Profit (strong move)",
+            "take_profit_pct":    "Take Profit (% target hit)",
+            "time_decay":         "Time Decay (market closing)",
+            "stop_loss":          "Stop Loss",
+        }
+        reason_label = reason_labels.get(result.exit_reason, result.exit_reason)
+        text = (
+            f"{prefix}{emoji} <b>POSITION EXITED</b> — {reason_label}\n"
+            f"\n"
+            f"📋 <b>{result.question[:80]}</b>\n"
+            f"📊 Entry: ${result.entry_price:.2f} → Exit: ${result.exit_price:.2f}\n"
+            f"💰 P&amp;L: <b>{pnl_str}</b> ({'+' if result.pnl_pct >= 0 else ''}{result.pnl_pct:.1f}%)\n"
+            f"Status: {'✓ Sold' if result.success else '✗ Sell failed'}"
+        )
+        self._send(text)
+
     def send_api_warning(self, wallet_label: str, consecutive_failures: int, error: str = "") -> None:
         """Alert when a wallet's API calls have been failing repeatedly."""
         text = (
