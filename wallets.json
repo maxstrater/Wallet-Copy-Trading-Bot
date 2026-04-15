@@ -1,12 +1,32 @@
 {
     "wallets": [
         {
-            "address": "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1",
-            "label": "whale_1"
+            "address": "0x000d257d2dc7616feaef4ae0f14600fdf50a758e",
+            "label": "politics_whale (Broken)"
         },
         {
-            "address": "0x204f72f35326db932158cba6adff0b9a1da95e14",
-            "label": "whale_2"
+            "address": "0xead152b855effa6b5b5837f53b24c0756830c76a",
+            "label": "sports_whale (Broken)"
+        },
+        {
+            "address": "0xbddf61af533ff524d27154e589d2d7a81510c684",
+            "label": "sports_whale2 (Broken)"
+        },
+        {
+            "address": "0x8c80d213c0cbad777d06ee3f58f6ca4bc03102c3",
+            "label": "politcal_whale2"
+        },
+        {
+            "address": "0xbacd00c9080a82ded56f504ee8810af732b0ab35",
+            "label": "politcs_whale3"
+        },
+        {
+            "address": "0x629bc4a1e53e1d475beb7ea3d388791e96dd995a",
+            "label": "politics_whale4"
+        },
+        {
+            "address": "0xee67f4f549180f564dd5910b1024b8c6729cef38",
+            "label": "sports_whale3"
         }
     ]
 }
